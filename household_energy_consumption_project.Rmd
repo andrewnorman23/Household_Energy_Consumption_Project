@@ -1,0 +1,255 @@
+---
+title: "Household Energy Consumption Estimation"
+author: "Andrew Norman"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+ pdf_document:
+     pandoc_args: ["--extract-media", "."]
+     latex_engine: xelatex
+---
+
+```{r, load libraries, include = FALSE}
+library(tidyverse)
+library(glmnet)
+library(knitr)
+library(Metrics)
+```
+
+# Data Processing
+
+```{r, data processing, echo= TRUE}
+recs <- read.csv("recs2020_public_v7.csv", stringsAsFactors = FALSE)
+
+factor_list <- c("TOTALBTU", "SQFTEST", "HDD65", "CDD65", "TYPEHUQ", "STORIES", 
+                 "TOTROOMS", "WINDOWS", "TYPEGLASS", "WINFRAME", "ADQINSUL", 
+                 "WASHLOAD", "WASHTEMP", "DRYRUSE", "EQUIPAGE", "FUELHEAT", 
+                 "AIRCOND", "ACEQUIPAGE", "H2OMAIN", "LGTIN4TO8", "MONEYPY", 
+                 "ATHOME", "FUELPOOL", "ROOFTYPE", "WALLTYPE", "REGIONC",
+                 "YEARMADERANGE", "BEDROOMS", "TOTHSQFT", "TOTCSQFT", "HHAGE")
+
+recs_clean <- recs %>% 
+  select(-TOTALBTUSPH, -TOTALBTUWTH, -TOTALBTUOTH, -DOEID) %>%
+  select(all_of(factor_list)) %>%
+  mutate(
+    TYPEHUQ = as.factor(TYPEHUQ),
+    STORIES = as.factor(STORIES),
+    WINDOWS = as.factor(WINDOWS),
+    TYPEGLASS = as.factor(TYPEGLASS),
+    WINFRAME = as.factor(WINFRAME),
+    FUELHEAT = as.factor(FUELHEAT),
+    AIRCOND = as.factor(AIRCOND),
+    H2OMAIN = as.factor(H2OMAIN),
+    LGTIN4TO8 = as.factor(LGTIN4TO8),
+    ATHOME = as.factor(ATHOME),
+    FUELPOOL = as.factor(FUELPOOL),
+    ROOFTYPE = as.factor(ROOFTYPE),
+    WALLTYPE = as.factor(WALLTYPE),
+    REGIONC = as.factor(REGIONC),
+    YEARMADERANGE = as.factor(YEARMADERANGE),
+    MONEYPY = as.factor(MONEYPY))
+
+recs_long <- recs_clean %>%
+  select(TOTALBTU, EQUIPAGE, SQFTEST, HHAGE) %>%
+  pivot_longer(cols = c(SQFTEST, EQUIPAGE, HHAGE),
+               names_to = "vars",
+               values_to = "vals")
+
+set.seed(2422024)
+
+eval_indices <- sample(1:nrow(recs_clean),
+                       size = 1000, replace = FALSE)
+
+eval_sample <- recs_clean[eval_indices, ]
+
+recs_remaining <- recs_clean[-eval_indices, ]
+
+n_remaining <- nrow(recs_remaining)
+
+train_indices <- sample(1:n_remaining,
+                        size = n_remaining / 2, replace = FALSE)
+
+train_sample <- recs_remaining[train_indices, ]
+
+test_sample <- recs_remaining[-train_indices, ]
+
+eval_sqft <- eval_sample %>%
+  mutate(SQFTEST = SQFTEST * 1.5)
+
+eval_equipage <- eval_sample %>%
+  mutate(EQUIPAGE = EQUIPAGE + 10)
+
+eval_hhage <- eval_sample %>%
+  mutate(HHAGE = HHAGE + 10)
+```
+
+# Prior Assumptions
+
+Prior to testing the relationship between these different variables, and the target variable `TOTALBTU` I can make some predictions about the relationships between these variables. I expect that homes with a larger estimated square footage, `SQFTEST`, will consume more energy overall. These larger homes would require the use of more energy for heating, cooling, and other daily functions. On top of that, I anticipate the age of the main space heating equipment `EQUIPAGE` will likely have an impact on the total energy consumption. I believe that likely the older heating systems aren’t as energy efficient, leading to higher energy consumption compared to the newer equipment. `HHAGE` is the measure of the homeowners reported age, I predict that there will be a moderate positive relationship between this and total energy usage since as you get older you may require more or less heat than the average person to be more comfortable. Also, if you are older you are more likely to be retired and may stay at home more thus consuming more energy on average.
+
+```{r, priors plot, echo = FALSE}
+ggplot(recs_long,
+       aes(x = vals,
+           y = TOTALBTU)) +
+  geom_point(alpha = .5) +
+  geom_smooth(method = "loess", se = FALSE, color = "red") +
+  facet_wrap(~ vars, scales = "free_x") +
+  theme_minimal() +
+  labs(
+    x = "Predictor Values",
+    y = "Total Energy Consumption (BTU)",
+    title = "Relationships Between Total Energy Output and Our Prior Predictions"
+  ) +
+  theme(plot.title = element_text(hjust = .5))
+```
+
+# Estimating a Model 
+
+```{r, lasso model, echo = FALSE}
+train_y <- train_sample$TOTALBTU
+test_y <- test_sample$TOTALBTU
+
+formula <- ~ (TOTHSQFT + TOTCSQFT + BEDROOMS + HDD65 + TYPEHUQ + YEARMADERANGE + 
+                WASHLOAD + WINDOWS + SQFTEST + FUELHEAT + MONEYPY + ATHOME + 
+                STORIES + TOTROOMS + DRYRUSE + EQUIPAGE + HHAGE)^2 + I(SQFTEST^2) + I(HDD65^2)
+
+X_train <- model.matrix(formula, data = train_sample)[, -1]
+X_test <- model.matrix(formula, data = test_sample)[, -1]
+
+lambda_seq <- 10^seq(-2, 4, length.out = 100)
+
+lasso_models <- lapply(lambda_seq, function(l) {
+  glmnet(X_train, train_y, alpha = 1, lambda = l, standardize = TRUE)
+})
+
+rmse <- function(actual, predicted) {
+  sqrt(mean((actual - predicted)^2))
+}
+
+rmse_df <- tibble(
+  lambda = lambda_seq,
+  train_rmse = sapply(1:length(lasso_models), function(i) {
+    pred <- predict(lasso_models[[i]], newx = X_train)
+    rmse(train_y, pred)
+  }),
+  test_rmse = sapply(1:length(lasso_models), function(i) {
+    pred <- predict(lasso_models[[i]], newx = X_test)
+    rmse(test_y, pred)
+  })
+)
+
+rmse_table <- rmse_df %>%
+  mutate(across(c(lambda, train_rmse, test_rmse), ~round(.x, 3)))
+
+best_lambda <- rmse_df %>%
+  filter(test_rmse == min(test_rmse)) %>%
+  pull(lambda)
+
+rmse_table %>%
+  slice(50:100) %>%
+  kable(caption = "Train and Test RMSEs for LASSO Across Lambda Values")
+```
+
+```{r, train and test graph, echo= FALSE}
+ggplot(rmse_df, aes(x = log(lambda))) +
+  geom_line(aes(y = train_rmse, color = "Train RMSE"), linewidth = 1) +
+  geom_line(aes(y = test_rmse, color = "Test RMSE"), linewidth = 1) +
+  geom_vline(xintercept = log(rmse_df$lambda[which.min(rmse_df$test_rmse)]), 
+             linetype = "dashed", color = "black") +
+  labs(
+    title = "Train and Test RMSE Across Lambda Values",
+    x = "log(Lambda)",
+    y = "RMSE",
+    color = ""
+  ) +
+  theme_minimal()
+```
+
+I chose roughly 20 variables from the 800 that I believe have a large effect on `TOTALBTU`. For my model I decided to use the LASSO given this data sample. I decided to use LASSO because the tuning that is needed is in the lambda value; this valuecan be varied very easily to arrive at the optimal lambda that minimizes the RMSE of the model when I use the evaluation sample. LASSO also works well given a large amount of variables, so even though I am not using all 800 them this method should work well. 
+
+# Evaluating the Model 
+
+```{r, lasso with eval sample, include = FALSE}
+all_train_data <- bind_rows(train_sample, test_sample)
+
+X_all <- model.matrix(formula, data = all_train_data)[, -1]
+y_all <- all_train_data$TOTALBTU
+
+
+final_model <- glmnet(X_all, y_all, alpha = 1, lambda = best_lambda)
+
+dummy_row <- train_sample[1, names(eval_sample)]
+eval_sample_fixed <- bind_rows(dummy_row, eval_sample)
+
+X_eval <- model.matrix(formula, data = eval_sample_fixed)[, -1]
+X_eval <- X_eval[-1, ]
+
+eval_preds <- predict(final_model, s = best_lambda, newx = X_eval)
+
+eval_results <- eval_sample %>%
+  mutate(pred_totalbtu = as.numeric(eval_preds))
+
+eval_rmse <- rmse(eval_results$TOTALBTU, eval_results$pred_totalbtu)
+
+eval_rmse
+
+x_eval_sqft <- model.matrix(formula, data = eval_sqft)[, -1]
+
+eval_results <- eval_results %>%
+  mutate(pred_sqft = 
+           as.numeric(
+             predict(final_model, s = best_lambda, newx = x_eval_sqft)),
+         difference_sqft = pred_sqft - pred_totalbtu)
+
+x_eval_equipage <- model.matrix(formula, data = eval_equipage)[, -1]
+
+eval_results <- eval_results %>%
+  mutate(pred_equipage = 
+           as.numeric(
+             predict(final_model, s = best_lambda, newx = x_eval_equipage)),
+         difference_equipage = pred_equipage - pred_totalbtu)
+
+x_eval_hhage <- model.matrix(formula, data = eval_hhage)[, -1]
+
+eval_results <- eval_results %>%
+  mutate(pred_hhage = 
+           as.numeric(
+             predict(final_model, s = best_lambda, newx = x_eval_hhage)),
+         difference_hhage = pred_hhage - pred_totalbtu)
+```
+
+```{r, priors plot with increased values, echo= FALSE}
+#Used help with GEN AI to format the new data to be able to plot it like in part 2
+pt4_graph_data <- eval_results %>%
+  select(SQFTEST, EQUIPAGE, HHAGE,
+         difference_sqft, difference_equipage, difference_hhage) %>%
+  pivot_longer(cols = c(difference_sqft, difference_equipage, difference_hhage),
+               names_to = "variable",
+               values_to = "difference") %>%
+  mutate(
+    value = case_when(
+      variable == "difference_sqft" ~ SQFTEST,
+      variable == "difference_equipage" ~ EQUIPAGE,
+      variable == "difference_hhage" ~ HHAGE
+    ),
+    variable = recode(variable,
+                      difference_sqft = "SQFTEST",
+                      difference_equipage = "EQUIPAGE",
+                      difference_hhage = "HHAGE"))
+
+ggplot(pt4_graph_data,
+       aes(x = value,
+           y = difference)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", se = FALSE, color = "red") +
+  facet_wrap(~ variable, scales = "free_x") +
+  labs(
+    x = "Modified Variables",
+    y = "Predicted Energy Consumption (BTU)",
+    title = "Change in Predicted BTU with Changed Variables"
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(),
+        axis.ticks.y = element_line(),
+        plot.title = element_text(hjust = .5))
+```
+After increasing the `EQUIPAGE` and `HHAGE` by 10 years it appears that most of the values for those two charts are positive, meaning that the increase in Equipment Age and Homeowner Age by 10 years increase the predicted energy usage (BTU). When we multiply `SQFTEST` by 1.5 it appears that change in predicted energy usage rapidly increases with an increase in estimated square feet. Since all variables are positive, this means that my prior predictions were correct about these variables having positive relationships with `TOTALBTU`.
