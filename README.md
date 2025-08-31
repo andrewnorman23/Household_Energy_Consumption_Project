@@ -1,6 +1,8 @@
 # Household_Energy_Consumption_Project
 
-For this project I was given a dataset with a very large amount of variables related to household energy consumption and asked to try to identify some of the key contributors to energy consumption. That dataset is posted under the data folder in a zipped file due to size. It is a real world RECS dataset consisting of 800 variables, of which I chose roughly 20 variables.
+For this project I was given a dataset with a very large amount of variables related to household energy consumption and asked to try to identify some of the key contributors to energy consumption. That dataset is posted under the data folder in a zipped file due to size. It is a real world RECS dataset consisting of 800 variables, of which I chose roughly 20 variables. There are two files in the reports folder, one is the raw .Rmd file for the report, and the second is the actual report in a .pdf file. 
+
+## Methodology
 
 First, I cleaned the dataset by selecting the variables from the dataset that I was interested in and converted all the variables to factors since in the documentation they were listed as factors but to start they were integers.
 
